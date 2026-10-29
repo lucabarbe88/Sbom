@@ -1,0 +1,4 @@
+requests==2.32.3
+flask>=3.0  # web
+-r other.txt
+numpy==2.1.0 ; python_version >= "3.10"
