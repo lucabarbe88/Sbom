@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+sbom.cdx.json
+sbom.spdx.json
