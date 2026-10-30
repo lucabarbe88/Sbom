@@ -26,6 +26,8 @@ import re
 import sys
 import tomllib
 import uuid
+from collections import Counter
+from functools import cached_property
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,18 +52,17 @@ class Component:
     licenses: list[str] = field(default_factory=list)
     group: str | None = None  # namespace (es. groupId Maven, scope npm)
 
-    @property
+    @cached_property
     def purl(self) -> str:
         name = self.name
         ns = self.group
         if self.ecosystem == "pypi":
             name = re.sub(r"[-_.]+", "-", name).lower()
-        if self.ecosystem == "npm" and name.startswith("@") and "/" in name:
+        if "/" in name and (self.ecosystem == "composer"
+                            or (self.ecosystem == "npm" and name.startswith("@"))):
             ns, name = name.split("/", 1)
-        if self.ecosystem == "golang" and "/" in name:
+        elif self.ecosystem == "golang" and "/" in name:
             ns, name = name.rsplit("/", 1)
-        if self.ecosystem == "composer" and "/" in name:
-            ns, name = name.split("/", 1)
         path = "/".join(quote(p, safe="") for p in ns.split("/")) + "/" if ns else ""
         purl = f"pkg:{self.ecosystem}/{path}{quote(name, safe='')}"
         if self.version:
@@ -77,6 +78,23 @@ class Component:
 # Parser
 # --------------------------------------------------------------------------- #
 
+_EXACT_VERSION = re.compile(r"^\d[\w.+-]*$")
+
+
+def _exact_version(v) -> str | None:
+    """Ritorna v solo se è una versione esatta (es. "1.2.3"), non un intervallo."""
+    return v if isinstance(v, str) and _EXACT_VERSION.match(v) else None
+
+
+def _load_json(path: Path):
+    return json.loads(path.read_text(errors="replace"))
+
+
+def _load_toml(path: Path) -> dict:
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
 _PEP508 = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)$")
 
 
@@ -90,41 +108,44 @@ def _parse_pep508(spec: str) -> tuple[str, str | None] | None:
     return name, (pinned.group(1) if pinned else None)
 
 
+def _pep508_component(spec: str, rel: str, scope: str = "required") -> Component | None:
+    parsed = _parse_pep508(spec)
+    return Component(parsed[0], parsed[1], "pypi", rel, scope=scope) if parsed else None
+
+
 def parse_requirements(path: Path, rel: str) -> list[Component]:
     out = []
     for line in path.read_text(errors="replace").splitlines():
         line = line.split(" #", 1)[0].strip()
         if not line or line.startswith(("#", "-", "git+", "http")):
             continue
-        parsed = _parse_pep508(line)
-        if parsed:
-            out.append(Component(parsed[0], parsed[1], "pypi", rel))
+        if c := _pep508_component(line, rel):
+            out.append(c)
     return out
 
 
 def parse_pyproject(path: Path, rel: str) -> list[Component]:
-    data = tomllib.loads(path.read_text(errors="replace"))
+    data = _load_toml(path)
     out = []
     project = data.get("project", {})
     for spec in project.get("dependencies", []):
-        if p := _parse_pep508(spec):
-            out.append(Component(p[0], p[1], "pypi", rel))
+        if c := _pep508_component(spec, rel):
+            out.append(c)
     for specs in project.get("optional-dependencies", {}).values():
         for spec in specs:
-            if p := _parse_pep508(spec):
-                out.append(Component(p[0], p[1], "pypi", rel, scope="optional"))
+            if c := _pep508_component(spec, rel, scope="optional"):
+                out.append(c)
     poetry = data.get("tool", {}).get("poetry", {})
     for name, ver in poetry.get("dependencies", {}).items():
         if name.lower() == "python":
             continue
-        v = ver if isinstance(ver, str) else (ver.get("version") if isinstance(ver, dict) else None)
-        pinned = v if v and re.match(r"^\d[\w.+-]*$", v) else None
-        out.append(Component(name, pinned, "pypi", rel))
+        v = ver.get("version") if isinstance(ver, dict) else ver
+        out.append(Component(name, _exact_version(v), "pypi", rel))
     return out
 
 
 def parse_poetry_lock(path: Path, rel: str) -> list[Component]:
-    data = tomllib.loads(path.read_text(errors="replace"))
+    data = _load_toml(path)
     return [
         Component(p["name"], p.get("version"), "pypi", rel,
                   scope="optional" if p.get("category") == "dev" else "required")
@@ -133,7 +154,7 @@ def parse_poetry_lock(path: Path, rel: str) -> list[Component]:
 
 
 def parse_pipfile_lock(path: Path, rel: str) -> list[Component]:
-    data = json.loads(path.read_text(errors="replace"))
+    data = _load_json(path)
     out = []
     for section, scope in (("default", "required"), ("develop", "optional")):
         for name, info in data.get(section, {}).items():
@@ -152,7 +173,7 @@ def _npm_license(info: dict) -> list[str]:
 
 
 def parse_package_lock(path: Path, rel: str) -> list[Component]:
-    data = json.loads(path.read_text(errors="replace"))
+    data = _load_json(path)
     out = []
     if "packages" in data:  # lockfile v2/v3
         for key, info in data["packages"].items():
@@ -176,12 +197,11 @@ def parse_package_lock(path: Path, rel: str) -> list[Component]:
 def parse_package_json(path: Path, rel: str) -> list[Component]:
     if (path.parent / "package-lock.json").exists():
         return []  # il lockfile è più preciso
-    data = json.loads(path.read_text(errors="replace"))
+    data = _load_json(path)
     out = []
     for section, scope in (("dependencies", "required"), ("devDependencies", "optional")):
         for name, ver in data.get(section, {}).items():
-            pinned = ver if re.match(r"^\d[\w.+-]*$", str(ver)) else None
-            out.append(Component(name, pinned, "npm", rel, scope=scope))
+            out.append(Component(name, _exact_version(ver), "npm", rel, scope=scope))
     return out
 
 
@@ -207,21 +227,20 @@ def parse_go_mod(path: Path, rel: str) -> list[Component]:
 
 
 def parse_cargo_lock(path: Path, rel: str) -> list[Component]:
-    data = tomllib.loads(path.read_text(errors="replace"))
+    data = _load_toml(path)
     # Pacchetti senza "source" sono i crate locali del progetto: li saltiamo.
     return [Component(p["name"], p.get("version"), "cargo", rel)
             for p in data.get("package", []) if p.get("source")]
 
 
 def parse_pom(path: Path, rel: str) -> list[Component]:
+    # "{*}" trova i tag con o senza namespace Maven.
     root = ET.parse(path).getroot()
-    ns = {"m": root.tag[1:].split("}")[0]} if root.tag.startswith("{") else {}
-    q = (lambda t: f"m:{t}") if ns else (lambda t: t)
     props = {}
-    pe = root.find(q("properties"), ns)
+    pe = root.find("{*}properties")
     if pe is not None:
         for child in pe:
-            props[child.tag.split("}")[-1]] = (child.text or "").strip()
+            props[child.tag.rpartition("}")[2]] = (child.text or "").strip()
 
     def resolve(v: str | None) -> str | None:
         if not v:
@@ -230,20 +249,19 @@ def parse_pom(path: Path, rel: str) -> list[Component]:
         return None if "${" in v else v
 
     out = []
-    for dep in root.iter(f"{{{ns['m']}}}dependency" if ns else "dependency"):
-        g = dep.findtext(q("groupId"), namespaces=ns)
-        a = dep.findtext(q("artifactId"), namespaces=ns)
+    for dep in root.iterfind(".//{*}dependency"):
+        a = dep.findtext("{*}artifactId")
         if not a:
             continue
-        scope = dep.findtext(q("scope"), namespaces=ns) or ""
-        out.append(Component(a, resolve(dep.findtext(q("version"), namespaces=ns)), "maven", rel,
+        scope = dep.findtext("{*}scope") or ""
+        out.append(Component(a, resolve(dep.findtext("{*}version")), "maven", rel,
                              scope="optional" if scope in ("test", "provided") else "required",
-                             group=resolve(g)))
+                             group=resolve(dep.findtext("{*}groupId"))))
     return out
 
 
 def parse_composer_lock(path: Path, rel: str) -> list[Component]:
-    data = json.loads(path.read_text(errors="replace"))
+    data = _load_json(path)
     out = []
     for section, scope in (("packages", "required"), ("packages-dev", "optional")):
         for p in data.get(section, []):
@@ -291,7 +309,7 @@ def find_parser(filename: str):
 
 def scan(root: Path) -> tuple[list[Component], list[str], list[str]]:
     """Ritorna (componenti, file letti, errori)."""
-    comps: dict[tuple, Component] = {}
+    comps: dict[str, Component] = {}
     files, errors = [], []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
@@ -308,10 +326,8 @@ def scan(root: Path) -> tuple[list[Component], list[str], list[str]]:
                 continue
             files.append(rel)
             for c in found:
-                existing = comps.get(c.key)
-                if existing is None:
-                    comps[c.key] = c
-                elif c.scope == "required":
+                existing = comps.setdefault(c.key, c)
+                if c.scope == "required":
                     existing.scope = "required"
     ordered = sorted(comps.values(), key=lambda c: (c.ecosystem, (c.group or ""), c.name.lower(), c.version or ""))
     return ordered, files, errors
@@ -322,7 +338,7 @@ def scan(root: Path) -> tuple[list[Component], list[str], list[str]]:
 # --------------------------------------------------------------------------- #
 
 def _now() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def to_cyclonedx(project: str, version: str | None, comps: list[Component]) -> dict:
@@ -352,7 +368,7 @@ def to_cyclonedx(project: str, version: str | None, comps: list[Component]) -> d
             "component": meta_comp,
         },
         "components": components,
-        "dependencies": [{"ref": root_ref, "dependsOn": [c.purl for c in comps]}],
+        "dependencies": [{"ref": root_ref, "dependsOn": [i["bom-ref"] for i in components]}],
     }
 
 
@@ -394,12 +410,9 @@ def to_spdx(project: str, version: str | None, comps: list[Component]) -> dict:
 
 
 def summary(comps: list[Component], files: list[str], errors: list[str]) -> dict:
-    by_eco: dict[str, int] = {}
-    for c in comps:
-        by_eco[c.ecosystem] = by_eco.get(c.ecosystem, 0) + 1
     return {
         "total_components": len(comps),
-        "by_ecosystem": by_eco,
+        "by_ecosystem": dict(Counter(c.ecosystem for c in comps)),
         "dev_or_optional": sum(c.scope == "optional" for c in comps),
         "without_version": [c.name for c in comps if not c.version],
         "without_license": sum(not c.licenses for c in comps),

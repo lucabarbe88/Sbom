@@ -17,11 +17,10 @@ consegnare un riepilogo chiaro con i punti di attenzione.
    repository) e il formato richiesto: `cyclonedx` (default) o `spdx`.
    Se l'utente non specifica nulla, usa CycloneDX JSON.
 
-2. **Ricognizione.** Usa Glob per elencare i file di dipendenze presenti
-   (es. `**/requirements*.txt`, `**/pyproject.toml`, `**/poetry.lock`,
-   `**/Pipfile.lock`, `**/package-lock.json`, `**/package.json`, `**/go.mod`,
-   `**/Cargo.lock`, `**/pom.xml`, `**/composer.lock`, `**/Gemfile.lock`),
-   ignorando `node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`.
+2. **Ricognizione.** Non serve cercare i file a mano: lo script incluso
+   riporta i file di dipendenze letti nel campo `files_scanned` del
+   riepilogo (`--summary`). I formati supportati sono elencati
+   nell'intestazione di `sbom_agent/generate_sbom.py`.
 
 3. **Generazione.** Scegli lo strumento in quest'ordine:
    - Se `syft` è installato (`command -v syft`): `syft dir:<cartella> -o cyclonedx-json=<out>`
