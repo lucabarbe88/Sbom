@@ -31,6 +31,7 @@ python3 sbom_agent/generate_sbom.py . -f spdx --no-dev -o sbom.spdx.json
 ```
 
 Opzioni: `--name`, `--version` (nome/versione del progetto), `--no-dev`,
+`--exclude PATTERN` (salta cartelle o file, es. `--exclude tests`; ripetibile),
 `--summary` (riepilogo JSON su stderr: totali, componenti senza versione, errori).
 
 ## Ecosistemi supportati
@@ -38,7 +39,7 @@ Opzioni: `--name`, `--version` (nome/versione del progetto), `--no-dev`,
 | Linguaggio | File letti |
 |---|---|
 | Python | `requirements*.txt`, `pyproject.toml`, `poetry.lock`, `Pipfile.lock` |
-| Node.js | `package-lock.json` (v1–v3), `package.json` (se manca il lock) |
+| Node.js | `package-lock.json` (v1–v3), `package.json` |
 | Go | `go.mod` |
 | Rust | `Cargo.lock` |
 | Java | `pom.xml` |
@@ -47,6 +48,10 @@ Opzioni: `--name`, `--version` (nome/versione del progetto), `--no-dev`,
 
 Ogni componente ha il suo **purl** (Package URL), utile per la scansione
 vulnerabilità, es. `grype sbom:sbom.cdx.json` o `trivy sbom sbom.cdx.json`.
+
+Se una libreria compare sia nel manifest senza versione (es. `pyproject.toml`)
+sia nel lockfile con versione esatta (es. `poetry.lock`), nello SBOM resta solo
+quella del lockfile.
 
 ## Limiti
 

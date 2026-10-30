@@ -48,6 +48,31 @@ class TestScan(unittest.TestCase):
             self.assertEqual(purls["pkg:maven/org.junit/junit@5.10.0"].scope, "optional")
             self.assertIn("pkg:gem/rake@13.2.1", purls)
 
+    def test_lockfile_version_wins_over_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "pyproject.toml").write_text('[project]\ndependencies = ["Requests>=2", "click"]\n')
+            Path(d, "poetry.lock").write_text(
+                '[[package]]\nname = "requests"\nversion = "2.32.3"\ncategory = "dev"\n')
+            Path(d, "package.json").write_text('{"dependencies": {"lodash": "^4.17.0"}}')
+            Path(d, "package-lock.json").write_text(
+                '{"packages": {"node_modules/lodash": {"version": "4.17.21", "dev": true}}}')
+            comps, files, _ = g.scan(Path(d))
+            purls = {c.purl: c for c in comps}
+            self.assertEqual(sorted(purls), ["pkg:npm/lodash@4.17.21", "pkg:pypi/click",
+                                             "pkg:pypi/requests@2.32.3"])
+            # required nel manifest vince su dev nel lockfile
+            self.assertEqual(purls["pkg:pypi/requests@2.32.3"].scope, "required")
+            self.assertEqual(purls["pkg:npm/lodash@4.17.21"].scope, "required")
+            self.assertIn("package.json", files)
+
+    def test_exclude(self):
+        comps, files, _ = g.scan(FIXTURE.parent.parent.parent, exclude=["*fixtures*"])
+        self.assertEqual((comps, files), ([], []))
+        comps, files, _ = g.scan(FIXTURE, exclude=["go.mod", "*.lock"])
+        self.assertEqual(sorted(files), ["package-lock.json", "requirements.txt"])
+        comps, files, _ = g.scan(FIXTURE.parent.parent.parent, exclude=["tests/fixtures"])
+        self.assertEqual(files, [])
+
 
 class TestOutput(unittest.TestCase):
     def test_cyclonedx_and_spdx(self):

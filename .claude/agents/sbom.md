@@ -28,9 +28,16 @@ consegnare un riepilogo chiaro con i punti di attenzione.
    - Se `cdxgen` è installato: `cdxgen -o <out> <cartella>`.
    - Altrimenti usa lo script incluso, che non ha dipendenze:
      ```bash
-     python3 sbom_agent/generate_sbom.py <cartella> -f <formato> -o <out> --summary
+     python3 sbom_agent/generate_sbom.py <cartella> -f <formato> -o <out> --summary \
+       --exclude '*fixtures*' --exclude testdata --exclude '*examples*'
      ```
      Il riepilogo JSON viene stampato su stderr.
+
+   Escludi sempre le cartelle con dati di prova (fixture, testdata, esempi):
+   contengono file di dipendenze finti che non fanno parte del progetto.
+   Prima di finire, controlla `files_scanned`: se vedi file che sembrano di
+   test, rigenera aggiungendo un `--exclude`. Con `syft` usa `--exclude`
+   nello stesso modo (es. `--exclude './tests/**'`).
 
    Nome file di default: `sbom.cdx.json` (CycloneDX) o `sbom.spdx.json` (SPDX),
    nella cartella analizzata, salvo diversa indicazione dell'utente.

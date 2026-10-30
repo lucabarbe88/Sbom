@@ -15,11 +15,17 @@ Ecosistemi supportati:
 
 Uso:
   python3 sbom_agent/generate_sbom.py <cartella> [-f cyclonedx|spdx] [-o file]
+      [--exclude PATTERN ...]
+
+Se la stessa libreria compare sia senza versione (manifest, es. pyproject.toml)
+sia con versione esatta (lockfile, es. poetry.lock), si tiene solo quella con
+la versione.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fnmatch
 import json
 import os
 import re
@@ -72,6 +78,11 @@ class Component:
     @property
     def key(self) -> str:
         return self.purl.lower()
+
+    @property
+    def base_key(self) -> str:
+        """Come key, ma senza versione: identifica la libreria."""
+        return self.key.rsplit("@", 1)[0] if self.version else self.key
 
 
 # --------------------------------------------------------------------------- #
@@ -195,8 +206,6 @@ def parse_package_lock(path: Path, rel: str) -> list[Component]:
 
 
 def parse_package_json(path: Path, rel: str) -> list[Component]:
-    if (path.parent / "package-lock.json").exists():
-        return []  # il lockfile è più preciso
     data = _load_json(path)
     out = []
     for section, scope in (("dependencies", "required"), ("devDependencies", "optional")):
@@ -307,18 +316,45 @@ def find_parser(filename: str):
     return None
 
 
-def scan(root: Path) -> tuple[list[Component], list[str], list[str]]:
+def _excluded(rel: str, patterns: list[str]) -> bool:
+    """True se il percorso relativo (o il suo nome) corrisponde a un pattern."""
+    name = rel.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(name, pat) for pat in patterns)
+
+
+def _drop_unversioned_duplicates(comps: list[Component]) -> list[Component]:
+    """Toglie le voci senza versione se la stessa libreria ha anche una versione esatta."""
+    versioned: dict[str, list[Component]] = {}
+    for c in comps:
+        if c.version:
+            versioned.setdefault(c.base_key, []).append(c)
+    out = []
+    for c in comps:
+        matches = None if c.version else versioned.get(c.base_key)
+        if not matches:
+            out.append(c)
+        elif c.scope == "required":
+            for m in matches:
+                m.scope = "required"
+    return out
+
+
+def scan(root: Path, exclude: list[str] | None = None) -> tuple[list[Component], list[str], list[str]]:
     """Ritorna (componenti, file letti, errori)."""
+    exclude = exclude or []
     comps: dict[str, Component] = {}
     files, errors = [], []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        prefix = "" if rel_dir == "." else rel_dir + "/"
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in SKIP_DIRS and not _excluded(prefix + d, exclude))
         for fn in sorted(filenames):
             parser = find_parser(fn)
-            if not parser:
+            rel = prefix + fn
+            if not parser or _excluded(rel, exclude):
                 continue
             p = Path(dirpath) / fn
-            rel = p.relative_to(root).as_posix()
             try:
                 found = parser(p, rel)
             except Exception as exc:  # file malformato: lo segnaliamo e proseguiamo
@@ -329,7 +365,7 @@ def scan(root: Path) -> tuple[list[Component], list[str], list[str]]:
                 existing = comps.setdefault(c.key, c)
                 if c.scope == "required":
                     existing.scope = "required"
-    ordered = sorted(comps.values(), key=lambda c: (c.ecosystem, (c.group or ""), c.name.lower(), c.version or ""))
+    ordered = sorted(_drop_unversioned_duplicates(list(comps.values())), key=lambda c: (c.ecosystem, (c.group or ""), c.name.lower(), c.version or ""))
     return ordered, files, errors
 
 
@@ -430,13 +466,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--version", dest="proj_version", help="versione del progetto")
     ap.add_argument("--no-dev", action="store_true", help="escludi dipendenze dev/opzionali")
     ap.add_argument("--summary", action="store_true", help="stampa un riepilogo JSON su stderr")
+    ap.add_argument("--exclude", action="append", default=[], metavar="PATTERN",
+                    help="salta cartelle/file che corrispondono al pattern (es. 'tests', '*fixtures*'); ripetibile")
     args = ap.parse_args(argv)
 
     root = Path(args.path).resolve()
     if not root.is_dir():
         print(f"Errore: {root} non è una cartella", file=sys.stderr)
         return 2
-    comps, files, errors = scan(root)
+    comps, files, errors = scan(root, args.exclude)
     if args.no_dev:
         comps = [c for c in comps if c.scope == "required"]
     project = args.name or root.name
